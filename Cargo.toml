@@ -1,0 +1,11 @@
+[package]
+name = "EthNetLite"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+k256 = {version = "0.13", features = ["ecdsa"] }
+sha3 = "0.10"
+rand = "0.8"
+hec = "0.4"
+thiserror = "1.0"
