@@ -1,20 +1,26 @@
-mod crypto;
-use crtate:;crypto::{generate_keypair, keccak256, node_id_from_pubkey, sign_message, verify_signature};
-use hex::encode as hex_encode;
- fn main() {
+mod transport;
 
-    let keypair = generate_keypair().expect("key generation failed");
+use std::net::SocketAddr;
+use transport::quic::{
+    connection::{accept, connect},
+    endpoint::start_endpoint,
+    stream::send,
+};
 
-    // Compute Node ID from public key
-    let node_id = node_id_from_pubkey(&keypair.public_key);
-    println!("Node ID: {}", hex_encode(&node_id));
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let port: u16 = args[1].parse().unwrap();
 
-    // demo sign + verify
-    let message = b"hello miniethnet";
-    let msg_hash = keccak256(message);
+    let endpoint = start_endpoint(port);
 
-    let signature = sign_message(&keypair.signing_key, &msg.hash).expect("sign failed");
-    let is_valid = veroify_signature(&keypair.public_key, &msg_hash, &signature);
+    if args.len() > 2 {
+        let peer_port: u16 = args[2].parse().unwrap();
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], peer_port));
 
-    println!("Signature valid: {}", is_valid);
- }
+        let conn = connect(&endpoint, peer_addr).await;
+        send(&conn, b"hello from peer").await;
+    }
+
+    accept(endpoint).await;
+}
