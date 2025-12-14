@@ -99,5 +99,10 @@ mod tests {
 
         let sig = sign_message(&kp.signing_key, &msg_hash).expect("sign failed");
         assert!(verify_signature(&kp.verifying_key, &msg_hash, &sig));
+
+        // corrupt hash -> should fail
+        let mut bad_hash = msg_hash;
+        bad_hash[0] ^= 0x42;
+        assert!(!verify_signature(&kp.verifying_key, &bad_hash, &sig));
     }
 } 
