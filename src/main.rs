@@ -1,5 +1,6 @@
 mod transport;
 mod discovery;
+mod session;
 
 use discovery::{enr::Enr, service::DiscoveryService};
 use transport::quic::endpoint::start_endpoint;
