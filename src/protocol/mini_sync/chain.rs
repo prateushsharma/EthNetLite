@@ -1,5 +1,5 @@
 use crate::protocol::mini_sync::header::Header;
-use rand::{thread_rng, Rng};
+use rand::{thread_rng,  RngCore};
 
 #[derive(Debug)]
 pub struct Chain {
@@ -36,13 +36,13 @@ impl Chain {
             }
         }
     }
-    pub fn produce_header(&mut self) {
+   pub fn produce_header(&mut self) {
         let parent = self.head().clone();
 
-        let hash = format!(
-            "0x{:x}",
-            thread_rng().gen::<u128>()
-        );
+        let mut rng = thread_rng();
+        let hi = rng.next_u64() as u128;
+        let lo = rng.next_u64() as u128;
+        let hash = format!("0x{:032x}", (hi << 64) | lo);
 
         let h = Header {
             parent_hash: parent.hash,
