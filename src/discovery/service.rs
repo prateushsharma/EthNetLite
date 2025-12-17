@@ -7,6 +7,7 @@ use crate::protocol::mini_sync::chain::Chain;
 use crate::protocol::mini_sync::message::{MiniSyncMessage, RequestHeaders, Status};
 
 use crate::session::handshake::{inbound_handshake, outbound_handshake};
+use crate::protocol::mini_sync::producer::start_header_producer;
 
 use quinn::{Connection, Endpoint};
 use std::net::SocketAddr;
@@ -38,6 +39,10 @@ impl DiscoveryService {
     }
 
     pub async fn run(self, bootstrap: Option<SocketAddr>) {
+        if self.local_enr.port == 9001 {
+            start_header_producer(self.chain.clone(),2).await;
+            println!("[MINE] header producer enabled");
+        }
         println!(
             "[DISC] local ENR: node_id={} addr={}:{}",
             self.local_enr.node_id, self.local_enr.ip, self.local_enr.port

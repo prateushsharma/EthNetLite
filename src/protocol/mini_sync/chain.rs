@@ -1,4 +1,5 @@
 use crate::protocol::mini_sync::header::Header;
+use rand::{thread_rng, Rng};
 
 #[derive(Debug)]
 pub struct Chain {
@@ -34,5 +35,21 @@ impl Chain {
                 self.headers.push(h);
             }
         }
+    }
+    pub fn produce_header(&mut self) {
+        let parent = self.head().clone();
+
+        let hash = format!(
+            "0x{:x}",
+            thread_rng().gen::<u128>()
+        );
+
+        let h = Header {
+            parent_hash: parent.hash,
+            hash,
+            number: parent.number + 1,
+        };
+
+        self.headers.push(h);
     }
 }
