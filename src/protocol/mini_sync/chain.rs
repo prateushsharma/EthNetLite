@@ -1,7 +1,7 @@
 use crate::protocol::mini_sync::header::Header;
 use rand::{thread_rng,  RngCore};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Chain {
     pub headers: Vec<Header>,
 }

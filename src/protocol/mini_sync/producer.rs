@@ -1,25 +1,22 @@
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};
 
-use crate::protocol::mini_sync::chain::Chain;
+use crate::protocol::mini_sync::manager::ChainManager;
 
-pub async fn start_header_producer(
-    chain: Arc<Mutex<Chain>>,
-    interval_secs: u64,
-) {
+pub async fn start_header_producer(mgr: Arc<Mutex<ChainManager>>, interval_secs: u64) {
     tokio::spawn(async move {
         loop {
             sleep(Duration::from_secs(interval_secs)).await;
 
-            let mut c = chain.lock().unwrap();
-            let before = c.height();
-            c.produce_header();
-            let after = c.height();
+            let mut m = mgr.lock().unwrap();
 
-            println!(
-                "[MINE] produced header {} → {}",
-                before, after
-            );
+            let before = m.canonical_height();
+            let mut next = m.canonical_clone();
+            next.produce_header();
+            m.insert_chain(next);
+            let after = m.canonical_height();
+
+            println!("[MINE] produced header {} → {}", before, after);
         }
     });
 }
