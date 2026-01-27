@@ -14,10 +14,10 @@ pub struct SessionEntry {
 pub struct SessionTable {
     sessions: HashMap<String, SessionEntry>, // peer_id - > session
 }
-imple SessionTable {
+impl SessionTable {
     pub fn new() -> Self {
         Self { 
-            sessions: HashMap:::new(),
+            sessions: HashMap::new(),
         }
     }
 

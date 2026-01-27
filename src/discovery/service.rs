@@ -8,6 +8,7 @@ use crate::protocol::mini_sync::message::{MiniSyncMessage, Status};
 use crate::protocol::mini_sync::producer::start_header_producer;
 
 use crate::session::handshake::{inbound_handshake, outbound_handshake};
+use crate::session::table::SessionTable;
 
 use quinn::{Connection, Endpoint};
 use std::net::SocketAddr;
@@ -24,6 +25,8 @@ pub struct DiscoveryService {
     table: Arc<Mutex<PeerTable>>,
     chain: Arc<Mutex<ChainManager>>,
     local_caps: Vec<String>,
+    sessions: Arc<Mutex<SessionTable>>,
+
 }
 
 impl DiscoveryService {
@@ -35,6 +38,8 @@ impl DiscoveryService {
             table: Arc::new(Mutex::new(PeerTable::new(32))),
             chain: Arc::new(Mutex::new(ChainManager::new(genesis))),
             local_caps: vec![DISC_PROTO.to_string(), SYNC_PROTO.to_string()],
+            sessions: Arc::new(Mutex::new(SessionTable::new())),
+
         }
     }
 
@@ -56,6 +61,8 @@ impl DiscoveryService {
         let chain = self.chain.clone();
         let local = self.local_enr.clone();
         let caps = self.local_caps.clone();
+        let sessions = self.sessions.clone();
+
 
         tokio::spawn(async move {
             loop {
@@ -65,18 +72,41 @@ impl DiscoveryService {
                         let chain = chain.clone();
                         let local = local.clone();
                         let caps = caps.clone();
-
+                        let sessions = sessions.clone();
                         tokio::spawn(async move {
-                            if let Ok(sess) =
-                                inbound_handshake(&conn, &local.node_id, &caps).await
-                            {
-                                println!(
-                                    "[SESS] inbound {} agreed={:?}",
-                                    sess.remote_node_id, sess.agreed_caps
-                                );
-                                connection_loop(conn, local, table, chain).await;
-                            }
-                        });
+    let sess = match inbound_handshake(&conn, &local.node_id, &caps).await {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    println!(
+        "[SESS] inbound {} agreed={:?}",
+        sess.remote_node_id, sess.agreed_caps
+    );
+
+    // ---- Dedup by remote_node_id ----
+    let peer_id = sess.remote_node_id.clone();
+    {
+        let mut st = sessions.lock().unwrap();
+        if st.has(&peer_id) {
+            println!("[SESS] duplicate peer {}, closing new conn", peer_id);
+            conn.close(0u32.into(), b"duplicate-session");
+            return;
+        }
+
+        // register active session
+        st.insert(crate::session::table::SessionEntry {
+            peer_id: peer_id.clone(),
+            conn: conn.clone(),
+            agreed_caps: sess.agreed_caps.clone(),
+            last_active: std::time::Instant::now(),
+        });
+    }
+
+    // Run the per-connection demux loop
+    connection_loop(conn, local, table, chain, sessions, peer_id).await;
+});
+
                     }
                 }
             }
@@ -159,9 +189,16 @@ async fn connection_loop(
     local: Enr,
     table: Arc<Mutex<PeerTable>>,
     chain: Arc<Mutex<ChainManager>>,
+    sessions: Arc<Mutex<SessionTable>>,
+    peer_id: String,
 ) {
     loop {
-        let Ok((_s, mut recv)) = conn.accept_bi().await else { return };
+        let Ok((_s, mut recv)) = conn.accept_bi().await else {
+    // connection ended → remove session
+    sessions.lock().unwrap().remove(&peer_id);
+    println!("[SESS] removed {}", peer_id);
+    return;
+};
 
         let Ok(len) = recv.read_u32().await else { continue };
         let mut buf = vec![0u8; len as usize];
