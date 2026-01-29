@@ -2,6 +2,9 @@ use quinn::Connection;
 use std::collections::HashMap;
 use std::time::Instant;
 
+pub const HEARTBEAT_SECS: u64 = 3;
+pub const IDLE_TIMEOUT_SECS: u64 = 12;
+
 #[derive(Debug)]
 pub struct SessionEntry {
     pub peer_id: String,
@@ -47,4 +50,27 @@ impl SessionTable {
     pub fn list_peers(&self) -> Vec<String> {
         self.sessions.keys().cloned().collect()
     }
+
+    pub fn idle_peers(&self) -> Vec<String> {
+    let now = Instant::now();
+    self.sessions
+        .iter()
+        .filter_map(|(peer_id, s)| {
+            if now.duration_since(s.last_active).as_secs() >= IDLE_TIMEOUT_SECS {
+                Some(peer_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+pub fn snapshot_conns(&self) -> Vec<(String, Connection)> {
+    self.sessions
+        .iter()
+        .map(|(peer_id, s)| (peer_id.clone(), s.conn.clone()))
+        .collect()
+}
+
+
+
 }

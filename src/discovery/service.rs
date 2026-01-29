@@ -44,109 +44,154 @@ impl DiscoveryService {
     }
 
     pub async fn run(self, bootstrap: Option<SocketAddr>) {
-        // enable header producer on leader
-        if self.local_enr.port == 9001 {
-            start_header_producer(self.chain.clone(), 2).await;
-            println!("[MINE] header producer enabled");
-        }
-
-        println!(
-            "[DISC] local ENR: node_id={} addr={}:{}",
-            self.local_enr.node_id, self.local_enr.ip, self.local_enr.port
-        );
-
-        // ---------------- inbound accept loop ----------------
-        let ep = self.endpoint.clone();
-        let table = self.table.clone();
-        let chain = self.chain.clone();
-        let local = self.local_enr.clone();
-        let caps = self.local_caps.clone();
-        let sessions = self.sessions.clone();
-
-
-        tokio::spawn(async move {
-            loop {
-                if let Some(connecting) = ep.accept().await {
-                    if let Ok(conn) = connecting.await {
-                        let table = table.clone();
-                        let chain = chain.clone();
-                        let local = local.clone();
-                        let caps = caps.clone();
-                        let sessions = sessions.clone();
-                        tokio::spawn(async move {
-    let sess = match inbound_handshake(&conn, &local.node_id, &caps).await {
-        Ok(s) => s,
-        Err(_) => return,
-    };
+    // enable header producer on leader
+    if self.local_enr.port == 9001 {
+        start_header_producer(self.chain.clone(), 2).await;
+        println!("[MINE] header producer enabled");
+    }
 
     println!(
-        "[SESS] inbound {} agreed={:?}",
-        sess.remote_node_id, sess.agreed_caps
+        "[DISC] local ENR: node_id={} addr={}:{}",
+        self.local_enr.node_id, self.local_enr.ip, self.local_enr.port
     );
 
-    // ---- Dedup by remote_node_id ----
-    let peer_id = sess.remote_node_id.clone();
-    {
-        let mut st = sessions.lock().unwrap();
-        if st.has(&peer_id) {
-            println!("[SESS] duplicate peer {}, closing new conn", peer_id);
-            conn.close(0u32.into(), b"duplicate-session");
-            return;
-        }
+    // ---------------- inbound accept loop ----------------
+    let ep = self.endpoint.clone();
+    let table = self.table.clone();
+    let chain = self.chain.clone();
+    let local = self.local_enr.clone();
+    let caps = self.local_caps.clone();
+    let sessions = self.sessions.clone();
 
-        // register active session
-        st.insert(crate::session::table::SessionEntry {
-            peer_id: peer_id.clone(),
-            conn: conn.clone(),
-            agreed_caps: sess.agreed_caps.clone(),
-            last_active: std::time::Instant::now(),
-        });
-    }
-
-    // Run the per-connection demux loop
-    connection_loop(conn, local, table, chain, sessions, peer_id).await;
-});
-
-                    }
-                }
-            }
-        });
-
-        // ---------------- bootstrap ----------------
-        if let Some(addr) = bootstrap {
-            if let Ok(conn) = self.dial(addr).await {
-                if let Ok(sess) =
-                    outbound_handshake(&conn, &self.local_enr.node_id, &self.local_caps).await
-                {
-                    println!("[SESS] outbound bootstrap {:?}", sess);
-
-                    let _ = send_enveloped(
-                        &conn,
-                        DISC_PROTO,
-                        &DiscoveryMessage::Ping {
-                            from: self.local_enr.clone(),
-                        }
-                        .to_bytes(),
-                    )
-                    .await;
-
-                    let st = self.local_status();
-                    let _ = send_enveloped(
-                        &conn,
-                        SYNC_PROTO,
-                        &MiniSyncMessage::Status(st).to_bytes(),
-                    )
-                    .await;
-                }
-            }
-        }
-
-        // ---------------- refresh loop ----------------
+    tokio::spawn(async move {
         loop {
-            self.refresh_round().await;
-            sleep(Duration::from_secs(3)).await;
+            if let Some(connecting) = ep.accept().await {
+                if let Ok(conn) = connecting.await {
+                    let table = table.clone();
+                    let chain = chain.clone();
+                    let local = local.clone();
+                    let caps = caps.clone();
+                    let sessions = sessions.clone();
+
+                    tokio::spawn(async move {
+                        let sess = match inbound_handshake(&conn, &local.node_id, &caps).await {
+                            Ok(s) => s,
+                            Err(_) => return,
+                        };
+
+                        println!(
+                            "[SESS] inbound {} agreed={:?}",
+                            sess.remote_node_id, sess.agreed_caps
+                        );
+
+                        // ---- Dedup by remote_node_id ----
+                        let peer_id = sess.remote_node_id.clone();
+                        {
+                            let mut st = sessions.lock().unwrap();
+                            if st.has(&peer_id) {
+                                println!("[SESS] duplicate peer {}, closing new conn", peer_id);
+                                conn.close(0u32.into(), b"duplicate-session");
+                                return;
+                            }
+
+                            st.insert(crate::session::table::SessionEntry {
+                                peer_id: peer_id.clone(),
+                                conn: conn.clone(),
+                                agreed_caps: sess.agreed_caps.clone(),
+                                last_active: std::time::Instant::now(),
+                            });
+                        }
+
+                        // Run the per-connection demux loop
+                        connection_loop(conn, local, table, chain, sessions, peer_id).await;
+                    });
+                }
+            }
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // ✅ Module 9.1.4: Heartbeat + Idle eviction task goes HERE
+    // ------------------------------------------------------------------
+    let sessions_hb = self.sessions.clone();
+    let local_hb = self.local_enr.clone();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(
+                crate::session::table::HEARTBEAT_SECS,
+            ))
+            .await;
+
+            // snapshot connections without holding lock across await
+            let conns = {
+                let st = sessions_hb.lock().unwrap();
+                st.snapshot_conns()
+            };
+
+            // heartbeat ping to all connected peers
+            for (_peer_id, conn) in conns {
+                let _ = send_enveloped(
+                    &conn,
+                    DISC_PROTO,
+                    &DiscoveryMessage::Ping {
+                        from: local_hb.clone(),
+                    }
+                    .to_bytes(),
+                )
+                .await;
+            }
+
+            // evict idle peers
+            let idle = {
+                let st = sessions_hb.lock().unwrap();
+                st.idle_peers()
+            };
+
+            if !idle.is_empty() {
+                let mut st = sessions_hb.lock().unwrap();
+                for peer in idle {
+                    println!("[SESS] evict idle peer {}", peer);
+                    st.remove(&peer);
+                }
+            }
+        }
+    });
+
+    // ---------------- bootstrap ----------------
+    if let Some(addr) = bootstrap {
+        if let Ok(conn) = self.dial(addr).await {
+            if let Ok(sess) =
+                outbound_handshake(&conn, &self.local_enr.node_id, &self.local_caps).await
+            {
+                println!("[SESS] outbound bootstrap {:?}", sess);
+
+                send_enveloped(
+                    &conn,
+                    DISC_PROTO,
+                    &DiscoveryMessage::Ping {
+                        from: self.local_enr.clone(),
+                    }
+                    .to_bytes(),
+                )
+                .await
+                .ok();
+
+                let st = self.local_status();
+                send_enveloped(&conn, SYNC_PROTO, &MiniSyncMessage::Status(st).to_bytes())
+                    .await
+                    .ok();
+            }
         }
     }
+
+    // ---------------- refresh loop ----------------
+    loop {
+        self.refresh_round().await;
+        sleep(Duration::from_secs(3)).await;
+    }
+}
+
 
     fn local_status(&self) -> Status {
         // ✅ ChainManager knows canonical head + genesis
@@ -207,6 +252,8 @@ async fn connection_loop(
         }
 
         let Some(env) = Envelope::from_bytes(&buf) else { continue };
+        sessions.lock().unwrap().touch(&peer_id);
+
 
         match env.proto.as_str() {
             DISC_PROTO => handle_discovery_msg(&conn, &local, &table, &env.data).await,
