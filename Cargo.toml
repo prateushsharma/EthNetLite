@@ -22,6 +22,7 @@ serde_json = "1.0"
 tonic        = "0.11"
 prost        = "0.12"
 tokio-stream = { version = "0.1", features = ["sync"] }
+tonic-reflection = "0.11"
 
 [build-dependencies]
 tonic-build = "0.11"
