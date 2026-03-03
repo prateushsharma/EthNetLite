@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package ethscope;
+
+service EthScope {
+    // Point-in-time snapshot of node state
+    rpc GetSummary(EmptyRequest) returns (SummaryResponse);
+
+    // All currently active sessions
+    rpc ListPeers(EmptyRequest) returns (PeerListResponse);
+
+    // Server-streaming: pushes events live as they happen
+    rpc StreamEvents(EmptyRequest) returns (stream NetworkEvent);
+}
+
+message EmptyRequest {}
+
+message SummaryResponse {
+    uint64 active_peers       = 1;
+    uint64 discovered_peers   = 2;
+    string canonical_head     = 3;
+    uint64 sync_height        = 4;
+    uint64 canonical_switches = 5;
+}
+
+message PeerListResponse {
+    repeated PeerInfo peers = 1;
+}
+
+message PeerInfo {
+    string peer_id              = 1;
+    repeated string agreed_caps = 2;
+}
+
+message NetworkEvent {
+    string event_type = 1;  // "canonical_switch" | "peer_join" | "peer_leave" | "fork_detected"
+    string peer_id    = 2;  // empty if not peer-specific
+    string detail     = 3;  // human-readable description
+    uint64 timestamp  = 4;  // unix seconds
+}

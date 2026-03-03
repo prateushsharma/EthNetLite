@@ -70,6 +70,12 @@ pub fn snapshot_conns(&self) -> Vec<(String, Connection)> {
         .map(|(peer_id, s)| (peer_id.clone(), s.conn.clone()))
         .collect()
 }
+pub fn list_peers_full(&self) -> Vec<(String, Vec<String>)> {
+    self.sessions
+        .iter()
+        .map(|(peer_id, entry)| (peer_id.clone(), entry.agreed_caps.clone()))
+        .collect()
+}
 
 
 
