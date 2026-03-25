@@ -150,34 +150,73 @@ Logs like:
 
 ---
 
-## 🧪 Multi-Node Sync
+## 🛠️ Prerequisites
+
+- **Rust:** 1.80+ (edition 2021)
+- **For local builds:** `protoc` (Protocol Buffers compiler) — `sudo apt-get install protobuf-compiler` on Ubuntu/Debian
+- **Docker:** For containerized runs (optional)
+
+---
+
+## 🚀 Building and Running
+
+### Local Build
 
 ```bash
-# Node 1: Header producer (mining simulator)
-cargo run -- 9001
+# Clone and build
+git clone https://github.com/prateushsharma/EthNetLite.git
+cd EthNetLite
 
-# Node 2: Syncing peer
-cargo run -- 9002 9001
+# Install protoc if not present
+sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-# Node 3: Another syncing peer
-cargo run -- 9003 9001
+# Build release
+cargo build --release
+
+# Run single node (P2P on 9001, gRPC on 10001)
+./target/release/EthNetLite 9001
+
+# Run multi-node network
+# Terminal 1: Node 1 (header producer)
+./target/release/EthNetLite 9001
+
+# Terminal 2: Node 2 (syncs from node 1)
+./target/release/EthNetLite 9002 127.0.0.1:9001
+
+# Terminal 3: Node 3 (syncs from node 1)
+./target/release/EthNetLite 9003 127.0.0.1:9001
 ```
 
-**What happens:**
+### Docker (Recommended for Testing)
 
-1. Nodes discover each other via ENR exchange
-2. Establish **exactly one session per peer** (enforced)
-3. Negotiate shared capabilities (`discv-lite/0.1`, `mini-sync/0.1`)
-4. Node 1 produces headers deterministically
-5. Nodes 2 & 3 request missing headers via `mini-sync`
-6. Canonical chain converges across all nodes
-7. Fork detection triggers if chains diverge
+```bash
+# Build image
+docker build -t ethnetlite .
 
-**Observable invariants:**
-- ✅ No duplicate sessions
-- ✅ No protocol confusion
-- ✅ Deterministic sync order
-- ✅ Fork switches logged explicitly
+# Run single node
+docker run -p 9001:9001 -p 10001:10001 ethnetlite:latest EthNetLite 9001
+
+# Multi-node with Docker Compose (3 nodes, auto-bootstrap)
+docker compose up --build
+```
+
+**Docker Compose sets up:**
+- Node 1: Port 9001/10001
+- Node 2: Port 9002/10002 (bootstraps to node1)
+- Node 3: Port 9003/10003 (bootstraps to node1)
+
+Monitor with `docker compose logs -f` or test gRPC with `grpcurl -plaintext localhost:10001 list`.
+
+---
+
+## 🔄 CI/CD
+
+GitHub Actions pipeline:
+- **Build & Test:** Rust build + tests on push/PR
+- **Docker Build:** Creates `ethnetlite:latest` image
+- **Status:** ✅ Passing (protoc installed in CI)
+
+View runs at: https://github.com/prateushsharma/EthNetLite/actions
 
 ---
 
