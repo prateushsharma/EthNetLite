@@ -1,6 +1,9 @@
 # Use the official Rust image as the base image for building
 FROM rust:latest as builder
 
+# Install protobuf compiler
+RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
+
 # Set the working directory
 WORKDIR /app
 
