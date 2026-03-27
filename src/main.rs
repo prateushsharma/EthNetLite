@@ -5,10 +5,12 @@ mod discovery;
 mod session;
 mod protocol;
 mod telemetry;
+mod enr;
+mod crypto;
 
 use std::sync::{atomic::AtomicU64, Arc, Mutex};
 
-use discovery::{enr::Enr, service::DiscoveryService};
+use discovery::service::DiscoveryService;
 use transport::quic::endpoint::start_endpoint;
 use protocol::mini_sync::manager::ChainManager;
 use session::table::SessionTable;
@@ -29,7 +31,7 @@ async fn main() {
     let grpc_port = port + 1000;
 
     let endpoint = start_endpoint(port);
-    let local_enr = Enr::new_local(port);
+    let (local_enr, _keypair) = crate::enr::create_local_enr(port);
 
     let bootstrap = if args.len() > 2 {
         let bp: u16 = args[2].parse().unwrap();

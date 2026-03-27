@@ -1,10 +1,10 @@
-use crate::discovery::enr::Enr;
+use crate::discovery::message::SerializableEnr;
 use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct PeerTable {
     max_size: usize,
-    peers: HashMap<String, Enr>, // node_id -> enr
+    peers: HashMap<String, SerializableEnr>, // node_id -> enr
 }
 
 impl PeerTable {
@@ -15,7 +15,7 @@ impl PeerTable {
         }
     }
 
-    pub fn insert(&mut self, local: &Enr, enr: Enr) -> bool {
+    pub fn insert(&mut self, local: &SerializableEnr, enr: SerializableEnr) -> bool {
         if enr.node_id == local.node_id {
             return false;
         }
@@ -32,7 +32,7 @@ impl PeerTable {
         true
     }
 
-    pub fn insert_many(&mut self, local: &Enr, enrs: Vec<Enr>) -> Vec<Enr> {
+    pub fn insert_many(&mut self, local: &SerializableEnr, enrs: Vec<SerializableEnr>) -> Vec<SerializableEnr> {
         let mut added = vec![];
         for e in enrs {
             if self.insert(local, e.clone()) {
@@ -42,7 +42,7 @@ impl PeerTable {
         added
     }
 
-    pub fn list(&self) -> Vec<Enr> {
+    pub fn list(&self) -> Vec<SerializableEnr> {
         self.peers.values().cloned().collect()
     }
 }

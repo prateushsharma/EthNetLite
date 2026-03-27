@@ -1,6 +1,6 @@
 
-use crate::discovery::enr::Enr;
-use crate::discovery::message::DiscoveryMessage;
+use crate::enr::EnrRecord;
+use crate::discovery::message::{DiscoveryMessage, SerializableEnr};
 use crate::discovery::table::PeerTable;
 
 use crate::protocol::envelope::Envelope;
@@ -29,7 +29,7 @@ const SYNC_PROTO: &str = "mini-sync/0.1";
 
 pub struct DiscoveryService {
     endpoint: Endpoint,
-    local_enr: Enr,
+    local_enr: EnrRecord,
     table: Arc<Mutex<PeerTable>>,
     chain: Arc<Mutex<ChainManager>>,
     local_caps: Vec<String>,
@@ -40,7 +40,7 @@ pub struct DiscoveryService {
 
 impl DiscoveryService {
     /// Original constructor — kept for backwards compat.
-    pub fn new(endpoint: Endpoint, local_enr: Enr) -> Self {
+    pub fn new(endpoint: Endpoint, local_enr: EnrRecord) -> Self {
         let genesis = "0xgenesis".to_string();
         Self {
             endpoint,
@@ -58,7 +58,7 @@ impl DiscoveryService {
     /// gRPC server and P2P loops share the exact same state.
     pub fn new_with_state(
         endpoint: Endpoint,
-        local_enr: Enr,
+        local_enr: EnrRecord,
         chain: Arc<Mutex<ChainManager>>,
         sessions: Arc<Mutex<SessionTable>>,
         event_bus: EventBus,
@@ -77,14 +77,16 @@ impl DiscoveryService {
     }
 
     pub async fn run(self, bootstrap: Option<SocketAddr>) {
-        if self.local_enr.port == 9001 {
+        if self.local_enr.quic_port().unwrap_or(0) == 9001 {
             start_header_producer(self.chain.clone(), 2).await;
             println!("[MINE] header producer enabled");
         }
 
         println!(
             "[DISC] local ENR: node_id={} addr={}:{}",
-            self.local_enr.node_id, self.local_enr.ip, self.local_enr.port
+            self.local_enr.node_id().unwrap_or_default(),
+            self.local_enr.ip().unwrap_or_default(),
+            self.local_enr.quic_port().unwrap_or(0)
         );
 
         // ── Inbound accept loop ───────────────────────────────────────────────
@@ -110,7 +112,7 @@ impl DiscoveryService {
                         let canonical_switches = canonical_switches.clone();
 
                         tokio::spawn(async move {
-                            let sess = match inbound_handshake(&conn, &local.node_id, &caps).await {
+                            let sess = match inbound_handshake(&conn, &local.node_id().unwrap_or_default(), &caps).await {
                                 Ok(s)  => s,
                                 Err(_) => return,
                             };
@@ -173,7 +175,7 @@ impl DiscoveryService {
                 for (_peer_id, conn) in conns {
                     let _ = send_enveloped(
                         &conn, DISC_PROTO,
-                        &DiscoveryMessage::Ping { from: local_hb.clone() }.to_bytes(),
+                        &DiscoveryMessage::Ping { from: (&local_hb).into() }.to_bytes(),
                     ).await;
                 }
 
@@ -197,13 +199,13 @@ impl DiscoveryService {
         if let Some(addr) = bootstrap {
             if let Ok(conn) = self.dial(addr).await {
                 if let Ok(sess) =
-                    outbound_handshake(&conn, &self.local_enr.node_id, &self.local_caps).await
+                    outbound_handshake(&conn, &self.local_enr.node_id().unwrap_or_default(), &self.local_caps).await
                 {
                     println!("[SESS] outbound bootstrap {:?}", sess);
 
                     send_enveloped(
                         &conn, DISC_PROTO,
-                        &DiscoveryMessage::Ping { from: self.local_enr.clone() }.to_bytes(),
+                        &DiscoveryMessage::Ping { from: (&self.local_enr).into() }.to_bytes(),
                     ).await.ok();
 
                     let st = self.local_status();
@@ -233,9 +235,9 @@ impl DiscoveryService {
     async fn refresh_round(&self) {
         let peers = self.table.lock().unwrap().list();
         for p in peers {
-            let addr: SocketAddr = format!("{}:{}", p.ip, p.port).parse().unwrap();
+            let addr: SocketAddr = format!("{}:{}", p.ip, p.quic_port).parse().unwrap();
             if let Ok(conn) = self.dial(addr).await {
-                if outbound_handshake(&conn, &self.local_enr.node_id, &self.local_caps)
+                if outbound_handshake(&conn, &self.local_enr.node_id().unwrap_or_default(), &self.local_caps)
                     .await.is_ok()
                 {
                     let st = self.local_status();
@@ -254,7 +256,7 @@ impl DiscoveryService {
 
 async fn connection_loop(
     conn: Connection,
-    local: Enr,
+    local: EnrRecord,
     table: Arc<Mutex<PeerTable>>,
     chain: Arc<Mutex<ChainManager>>,
     sessions: Arc<Mutex<SessionTable>>,
@@ -294,7 +296,7 @@ async fn connection_loop(
 
 async fn handle_discovery_msg(
     conn: &Connection,
-    local: &Enr,
+    local: &EnrRecord,
     table: &Arc<Mutex<PeerTable>>,
     payload: &[u8],
 ) {
@@ -302,15 +304,17 @@ async fn handle_discovery_msg(
 
     match msg {
         DiscoveryMessage::Ping { from } => {
-            table.lock().unwrap().insert(local, from.clone());
+            let local_serializable = SerializableEnr::from(local);
+            table.lock().unwrap().insert(&local_serializable, from.clone());
             let _ = send_enveloped(
                 conn, DISC_PROTO,
-                &DiscoveryMessage::Pong { from: local.clone() }.to_bytes(),
+                &DiscoveryMessage::Pong { from: local_serializable }.to_bytes(),
             ).await;
         }
         DiscoveryMessage::Nodes { from, peers } => {
-            table.lock().unwrap().insert(local, from);
-            table.lock().unwrap().insert_many(local, peers);
+            let local_serializable = SerializableEnr::from(local);
+            table.lock().unwrap().insert(&local_serializable, from);
+            table.lock().unwrap().insert_many(&local_serializable, peers);
         }
         _ => {}
     }
