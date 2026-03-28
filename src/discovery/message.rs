@@ -1,35 +1,45 @@
 use crate::enr::EnrRecord;
 use serde::{Deserialize, Serialize};
+use k256::ecdsa::Signature;
 
 // Serializable ENR for network messages
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SerializableEnr {
-    pub node_id: String,
-    pub ip: String,
-    pub udp_port: u16,
-    pub quic_port: u16,
-    pub capabilities: Vec<String>,
+pub struct WireEnr {
+    pub signature: Vec<u8>,
+    pub seq: u64,
+    pub pairs: Vec<(Vec<u8>, Vec<u8>)>,
 }
-
-impl From<&EnrRecord> for SerializableEnr {
+impl From<&EnrRecord> for WireEnr {
     fn from(enr: &EnrRecord) -> Self {
         Self {
-            node_id: enr.node_id().unwrap_or_default(),
-            ip: enr.ip().unwrap_or_default(),
-            udp_port: enr.udp_port().unwrap_or(0),
-            quic_port: enr.quic_port().unwrap_or(0),
-            capabilities: enr.capabilities(),
+            signature: enr.signature.to_der().as_bytes().to_vec(),
+            seq: enr.seq,
+            pairs: enr.pairs.clone(),
         }
+    }
+}
+
+impl TryFrom<WireEnr> for EnrRecord {
+    type Error = String;
+
+    fn try_from(value: WireEnr) -> Result<Self, Self::Error> {
+        let signature = Signature::from_der(&value.signature)
+            .map_err(|e| format!("invalid ENR signature: {}", e))?;
+        Ok(Self {
+            signature,
+            seq: value.seq,
+            pairs: value.pairs,
+        })
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum DiscoveryMessage {
-    Ping { from: SerializableEnr },
-    Pong { from: SerializableEnr },
-    FindNodes { from: SerializableEnr },
-    Nodes { from: SerializableEnr, peers: Vec<SerializableEnr> },
+    Ping { from: WireEnr },
+    Pong { from: WireEnr },
+    FindNodes { from: WireEnr },
+    Nodes { from: WireEnr, peers: Vec<WireEnr> },
 }
 
 impl DiscoveryMessage {

@@ -49,21 +49,32 @@ impl EnrBuilder {
         self
     }
 
-    pub fn build(self, keypair: &Keypair) -> EnrRecord {
-        let mut stream = rlp::RlpStream::new_list(1 + self.pairs.len() * 2);
-        stream.append(&self.seq);
-        for (k, v) in &self.pairs {
-            stream.append(k);
-            stream.append(v);
-        }
+   pub fn build(self, keypair: &Keypair) -> EnrRecord {
+    let mut pairs = self.pairs;
 
-        let content_hash = crate::crypto::keccak256(&stream.out());
-        let signature = sign_message(&keypair.signing_key, &content_hash)
-            .expect("ENR signing failed");
-        EnrRecord {
-            signature,
-            seq: self.seq,
-            pairs: self.pairs,
-        }
+    let pubkey_bytes = keypair
+        .verifying_key
+        .to_encoded_point(false)
+        .as_bytes()
+        .to_vec();
+
+    pairs.push((b"secp256k1".to_vec(), pubkey_bytes));
+
+    let mut stream = rlp::RlpStream::new_list(1 + pairs.len() * 2);
+    stream.append(&self.seq);
+    for (k, v) in &pairs {
+        stream.append(k);
+        stream.append(v);
     }
+
+    let content_hash = crate::crypto::keccak256(&stream.out());
+    let signature = sign_message(&keypair.signing_key, &content_hash)
+        .expect("ENR signing failed");
+
+    EnrRecord {
+        signature,
+        seq: self.seq,
+        pairs,
+    }
+}
 }

@@ -1,8 +1,6 @@
-use crate::crypto::{keccak256, sign_message, verify_signature};
-use crate::crypto::{Keypair};
-use k256::ecdsa::Signature;
-use rlp::{Encodable, RlpStream};
-
+use crate::crypto::{keccak256, verify_signature};
+use k256::ecdsa::{Signature, VerifyingKey};
+use rlp::RlpStream;
 #[derive(Debug, Clone)]
 pub struct EnrRecord {
     pub signature: Signature,
@@ -25,6 +23,22 @@ impl EnrRecord {
         let content_hash = self.content_hash();
         verify_signature(pubkey, &content_hash, &self.signature)
     }
+
+    pub fn pubkey_bytes(&self) -> Option<Vec<u8>> {
+    self.get(b"secp256k1").cloned()
+}
+
+pub fn verifying_key(&self) -> Option<VerifyingKey> {
+    let bytes = self.pubkey_bytes()?;
+    VerifyingKey::from_sec1_bytes(&bytes).ok()
+}
+
+pub fn verify_self(&self) -> bool {
+    let Some(pubkey) = self.verifying_key() else {
+        return false;
+    };
+    self.verify(&pubkey)
+}
 
     // Convenience getters for common ENR fields
     pub fn node_id(&self) -> Option<String> {
@@ -91,5 +105,6 @@ mod tests {
             .build(&kp);
 
         assert!(enr.verify(&kp.verifying_key));
+        assert!(enr.verify_self());
     }
 }

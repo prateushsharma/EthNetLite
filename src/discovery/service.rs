@@ -1,6 +1,6 @@
 
 use crate::enr::EnrRecord;
-use crate::discovery::message::{DiscoveryMessage, SerializableEnr};
+use crate::discovery::message::{DiscoveryMessage, WireEnr};
 use crate::discovery::table::PeerTable;
 
 use crate::protocol::envelope::Envelope;
@@ -21,11 +21,33 @@ use std::sync::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, Duration};
+use std::convert::TryFrom;
 
 const DISC_PROTO: &str = "discv-lite/0.1";
 const SYNC_PROTO: &str = "mini-sync/0.1";
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+fn wire_enr_get(enr: &WireEnr, key: &[u8]) -> Option<Vec<u8>> {
+    enr.pairs
+        .iter()
+        .find(|(k, _)| k.as_slice() == key)
+        .map(|(_, v)| v.clone())
+}
+
+fn wire_enr_ip(enr: &WireEnr) -> Option<String> {
+    wire_enr_get(enr, b"ip").and_then(|v| String::from_utf8(v.clone()).ok())
+}
+
+fn wire_enr_quic_port(enr: &WireEnr) -> Option<u16> {
+    wire_enr_get(enr, b"quic").and_then(|v| {
+        if v.len() == 2 {
+            Some(u16::from_be_bytes([v[0], v[1]]))
+        } else {
+            None
+        }
+    })
+}
 
 pub struct DiscoveryService {
     endpoint: Endpoint,
@@ -235,7 +257,9 @@ impl DiscoveryService {
     async fn refresh_round(&self) {
         let peers = self.table.lock().unwrap().list();
         for p in peers {
-            let addr: SocketAddr = format!("{}:{}", p.ip, p.quic_port).parse().unwrap();
+           let Some(ip) = wire_enr_ip(&p) else { continue };
+let Some(quic_port) = wire_enr_quic_port(&p) else { continue };
+let Ok(addr) = format!("{}:{}", ip, quic_port).parse::<SocketAddr>() else { continue };
             if let Ok(conn) = self.dial(addr).await {
                 if outbound_handshake(&conn, &self.local_enr.node_id().unwrap_or_default(), &self.local_caps)
                     .await.is_ok()
@@ -304,22 +328,71 @@ async fn handle_discovery_msg(
 
     match msg {
         DiscoveryMessage::Ping { from } => {
-            let local_serializable = SerializableEnr::from(local);
-            table.lock().unwrap().insert(&local_serializable, from.clone());
+            let Ok(remote_enr) = EnrRecord::try_from(from.clone()) else {
+                println!("[DISC] rejected peer: malformed ENR");
+                return;
+            };
+
+            if !remote_enr.verify_self() {
+                println!(
+                    "[DISC] rejected peer: invalid ENR signature for node_id={}",
+                    remote_enr.node_id().unwrap_or_default()
+                );
+                return;
+            }
+
+            let local_wire = WireEnr::from(local);
+            table.lock().unwrap().insert(&local_wire, from);
+
             let _ = send_enveloped(
-                conn, DISC_PROTO,
-                &DiscoveryMessage::Pong { from: local_serializable }.to_bytes(),
+                conn,
+                DISC_PROTO,
+                &DiscoveryMessage::Pong { from: local_wire }.to_bytes(),
             ).await;
         }
+
         DiscoveryMessage::Nodes { from, peers } => {
-            let local_serializable = SerializableEnr::from(local);
-            table.lock().unwrap().insert(&local_serializable, from);
-            table.lock().unwrap().insert_many(&local_serializable, peers);
+            let local_wire = WireEnr::from(local);
+
+            let Ok(remote_enr) = EnrRecord::try_from(from.clone()) else {
+                println!("[DISC] rejected Nodes sender: malformed ENR");
+                return;
+            };
+
+            if !remote_enr.verify_self() {
+                println!(
+                    "[DISC] rejected Nodes sender: invalid ENR signature for node_id={}",
+                    remote_enr.node_id().unwrap_or_default()
+                );
+                return;
+            }
+
+            table.lock().unwrap().insert(&local_wire, from);
+
+            let mut verified_peers = Vec::new();
+            for peer in peers {
+                let Ok(peer_enr) = EnrRecord::try_from(peer.clone()) else {
+                    println!("[DISC] skipped peer in Nodes: malformed ENR");
+                    continue;
+                };
+
+                if !peer_enr.verify_self() {
+                    println!(
+                        "[DISC] skipped peer in Nodes: invalid ENR signature for node_id={}",
+                        peer_enr.node_id().unwrap_or_default()
+                    );
+                    continue;
+                }
+
+                verified_peers.push(peer);
+            }
+
+            table.lock().unwrap().insert_many(&local_wire, verified_peers);
         }
+
         _ => {}
     }
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Sync handler — publishes canonical_switch events
 // ─────────────────────────────────────────────────────────────────────────────
