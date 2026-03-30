@@ -1,5 +1,5 @@
 use crate::protocol::mini_sync::header::Header;
-use rand::{thread_rng,  RngCore};
+use rand::{thread_rng, RngCore};
 
 #[derive(Debug, Clone)]
 pub struct Chain {
@@ -28,15 +28,39 @@ impl Chain {
         self.head().hash.clone()
     }
 
-    // MVP fork-choice: append if it extends current head by +1
+    pub fn contains_hash(&self, hash: &str) -> bool {
+        self.headers.iter().any(|h| h.hash == hash)
+    }
+
+    pub fn prefix_until(&self, hash: &str) -> Option<Chain> {
+        let idx = self.headers.iter().position(|h| h.hash == hash)?;
+        Some(Chain {
+            headers: self.headers[..=idx].to_vec(),
+        })
+    }
+
+    pub fn can_append_header(&self, header: &Header) -> bool {
+        header.number == self.height() + 1 && header.parent_hash == self.head_hash()
+    }
+
+    pub fn append_header(&mut self, header: Header) -> bool {
+        if self.can_append_header(&header) {
+            self.headers.push(header);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn append_linear(&mut self, headers: Vec<Header>) {
         for h in headers {
-            if h.number == self.height() + 1 && h.parent_hash == self.head_hash() {
-                self.headers.push(h);
+            if !self.append_header(h) {
+                break;
             }
         }
     }
-   pub fn produce_header(&mut self) {
+
+    pub fn produce_header(&mut self) {
         let parent = self.head().clone();
 
         let mut rng = thread_rng();
