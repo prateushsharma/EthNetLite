@@ -1,4 +1,3 @@
-
 # MiniEthNet
 
 **Production-Grade Ethereum P2P Stack from Scratch (Rust + QUIC)**
@@ -137,6 +136,213 @@ Logs like:
 
 ---
 
+## 🌿 Fork System (Deep Dive)
+
+MiniEthNet now implements a **branch-aware fork system**, not just fork detection.
+
+This means the node does not assume a single linear chain — it actively maintains **multiple competing branches** and decides which one is canonical.
+
+---
+
+### 🧠 Core Idea
+
+When a new header arrives, the system does NOT blindly append to the current head.
+
+Instead, it:
+
+1. Finds a chain containing the header's `parent_hash`
+2. Clones that chain **up to the parent**
+3. Appends the new header
+4. Stores this as a **new branch**
+5. Runs fork-choice across all branches
+6. Updates canonical head if a better branch exists
+
+---
+
+### 📌 Example
+
+```text
+genesis -> A -> B -> C
+              \
+               X -> Y -> Z
+```
+
+If the fork grows longer:
+
+```
+[FORK] canonical switch C -> Z
+```
+
+---
+
+### ⚙️ Current Fork-Choice Rule
+
+MiniEthNet currently uses:
+
+```
+ForkChoiceRule::LongestChain
+```
+
+The chain with the highest height becomes canonical. This is intentionally simple and deterministic.
+
+---
+
+### 🧱 Internal Design
+
+| Component | Responsibility |
+|-----------|---------------|
+| `Chain` | Represents a branch (Vec of headers) |
+| `ChainManager` | Stores all candidate branches |
+| `ForkChoiceRule` | Defines selection policy |
+| `choose()` | Picks best chain |
+| `import_headers()` | Creates new branches |
+
+---
+
+### 🔥 What This Enables
+
+- ✅ Competing branches
+- ✅ Forks from older ancestors (not just head)
+- ✅ Canonical switching
+- ✅ Reorg-like behavior
+- ✅ Experimental consensus design
+
+---
+
+### ⚠️ Important Detail
+
+MiniEthNet currently uses a **branch-copy model**:
+
+- Each branch stores full header history
+- Shared history is duplicated
+
+This keeps the system:
+
+- Simple
+- Debuggable
+- Easy to extend
+
+> Real clients use DAG-style storage — this can be added later.
+
+---
+
+### 🧪 Extending Fork Choice (Build Your Own Logic)
+
+This is the **main extension point** of the system. You can fork this repo → modify fork-choice → run your own chain behavior.
+
+**📍 Files to Modify**
+
+```
+src/protocol/mini_sync/fork_choice.rs
+src/protocol/mini_sync/manager.rs
+```
+
+**🛠️ Step 1: Add a New Rule**
+
+```rust
+pub enum ForkChoiceRule {
+    LongestChain,
+    LexicographicHead,
+}
+```
+
+**🛠️ Step 2: Implement Logic**
+
+```rust
+match rule {
+    ForkChoiceRule::LongestChain => {
+        candidates.iter().max_by_key(|c| c.height())
+    }
+
+    ForkChoiceRule::LexicographicHead => {
+        candidates.iter().max_by_key(|c| c.head_hash())
+    }
+}
+```
+
+**🛠️ Step 3: Activate Rule**
+
+```rust
+rule: ForkChoiceRule::LexicographicHead
+```
+
+---
+
+### ⚡ Example Custom Rules
+
+You can build:
+
+- Longest chain with tie-breaker
+- Score-based chain selection
+- Heaviest branch rule
+- Randomized selection (for testing)
+- Checkpoint-based rule
+- LMD-GHOST inspired fork choice
+
+---
+
+### 🧠 What Happens After Modification
+
+If someone runs your modified client:
+
+- They may follow a different canonical chain
+- This creates a **runtime blockchain fork**
+
+This is exactly how real blockchain clients diverge.
+
+---
+
+### 🧪 How to Test Your Rule
+
+```bash
+cargo test -- --nocapture
+```
+
+You should observe:
+
+```
+[FORK] canonical switch ...
+```
+
+---
+
+### 🧭 Recommended Contributor Workflow
+
+```bash
+git clone https://github.com/prateushsharma/EthNetLite.git
+cd EthNetLite
+
+git checkout -b feat/custom-fork-choice
+
+cargo build
+cargo test
+```
+
+Then:
+
+1. Add new fork rule
+2. Modify `choose()`
+3. Add test
+4. Verify canonical switching
+5. Commit
+
+---
+
+### 🎯 Why This Matters
+
+MiniEthNet is not just a static client. It is a:
+
+> **Fork-choice experimentation framework**
+
+You can:
+
+- Test new consensus ideas
+- Simulate adversarial forks
+- Experiment with chain selection rules
+- Study reorg behavior
+
+---
+
 ### 4. Zero Async Data Races
 
 **Problem:** Async Rust makes it trivial to deadlock or corrupt shared state.
@@ -267,6 +473,7 @@ Current roadmap for production-grade features:
 - ✅ Multi-node sync functional
 - ✅ All critical invariants enforced
 - ✅ Fork detection operational
+- ✅ Branch-aware fork system with pluggable fork-choice
 - 🟡 Gossip layer (next)
 - 🟡 Peer scoring (planned)
 
@@ -277,5 +484,3 @@ Current roadmap for production-grade features:
 ---
 
 ****Made with 💗 by Prateush Sharma****
-
----
