@@ -14,6 +14,7 @@ MiniEthNet implements the **full networking stack** of an Ethereum execution cli
 
 - **Cryptographic peer identity** with session deduplication
 - **Fork-aware chain synchronization** with canonical switching
+- **Full reorg tracking** with fork point, depth, and segment diff
 - **Protocol multiplexing** over capability-negotiated sessions
 - **Distributed discovery** via ENR-based peer tables
 - **Async-safe concurrency** with zero data races
@@ -36,6 +37,7 @@ MiniEthNet rebuilds what Ethereum Foundation researchers spent years designing:
 | Call `eth_getBlockByNumber` | Negotiate capabilities, sync headers, detect forks |
 | Assume peers are honest | Handle Byzantine behavior at the protocol level |
 | Trust libp2p abstractions | Build QUIC transport, session tables, envelope routing from scratch |
+| Detect forks happened | Track exact reorg depth, removed/added segments |
 
 This is the **infrastructure layer** most developers never touch.
 
@@ -50,6 +52,7 @@ This is the **infrastructure layer** most developers never touch.
 ├──────────────────────────────────────────────────┤
 │      Mini-Sync Protocol (Fork-Aware ETH/66)      │
 │   Canonical Chain Selection • Header Validation  │
+│   Fork Handling + Reorg Tracking                 │
 ├──────────────────────────────────────────────────┤
 │         Protocol Multiplexer (Envelopes)         │
 │      Route by Capability: discv-lite, mini-sync  │
@@ -136,9 +139,22 @@ Logs like:
 
 ---
 
+### 4. Zero Async Data Races
+
+**Problem:** Async Rust makes it trivial to deadlock or corrupt shared state.
+
+**Solution:**
+- No mutex held across `.await`
+- Lock-free message passing where possible
+- Explicit session cleanup on disconnect
+
+**Result:** Zero panics in 50,000+ message tests.
+
+---
+
 ## 🌿 Fork System (Deep Dive)
 
-MiniEthNet now implements a **branch-aware fork system**, not just fork detection.
+MiniEthNet implements a **branch-aware fork system**, not just fork detection.
 
 This means the node does not assume a single linear chain — it actively maintains **multiple competing branches** and decides which one is canonical.
 
@@ -159,19 +175,104 @@ Instead, it:
 
 ---
 
-### 📌 Example
+### 📌 Fork Diagram
 
-```text
-genesis -> A -> B -> C
-              \
-               X -> Y -> Z
-```
-
-If the fork grows longer:
+The following illustrates how competing branches form and how canonical selection works:
 
 ```
-[FORK] canonical switch C -> Z
+                        ┌─────────────────────────────────────────────────────┐
+                        │              BRANCH-AWARE FORK SYSTEM               │
+                        └─────────────────────────────────────────────────────┘
+
+  INITIAL STATE (Chain A is canonical):
+
+  [genesis] ──► [A1] ──► [A2] ──► [A3]   ◄── canonical HEAD
+                                    ▲
+                              height = 3
+
+
+  NEW HEADERS ARRIVE (Chain B forks from genesis):
+
+  [genesis] ──► [A1] ──► [A2] ──► [A3]   ◄── old canonical
+       │
+       └───────► [B1] ──► [B2] ──► [B3] ──► [B4]   ◄── new canonical
+                                                ▲
+                                          height = 4
+
+
+  FORK CHOICE RUNS: LongestChain selected B4
+
+  [FORK] canonical switch A3 → B4 (height 3 → 4)
+
+
+  LEGEND:
+  ───►  block reference (parent → child)
+  └───  fork point (branch diverges here)
+  ◄──   canonical HEAD pointer
 ```
+
+---
+
+### 🔁 Reorg Tracking
+
+MiniEthNet now tracks **full reorganization events** instead of just detecting canonical switches.
+
+When a fork wins, the system computes:
+
+- **fork point** — last common ancestor between old and new canonical
+- **reorg depth** — number of blocks replaced on the old chain
+- **removed blocks** — the old canonical segment being evicted
+- **added blocks** — the new canonical segment taking over
+
+#### Reorg Diagram
+
+```
+                        ┌─────────────────────────────────────────────────────┐
+                        │               REORG EVENT (VISUALIZED)              │
+                        └─────────────────────────────────────────────────────┘
+
+  PRE-IMPORT STATE:
+
+  [genesis] ──► [A1] ──► [A2] ──► [A3]   ◄── canonical HEAD
+       │
+       └───────► [B1] ──► [B2] ──► [B3]
+
+
+  POST-IMPORT STATE (B4 arrives, B-chain wins fork choice):
+
+  [genesis] ──► [A1] ──► [A2] ──► [A3]   ✗  (evicted from canonical)
+       │                                       removed = [A1, A2, A3]
+       │
+       └───────► [B1] ──► [B2] ──► [B3] ──► [B4]   ◄── new canonical HEAD
+                                                          added = [B1, B2, B3, B4]
+
+
+  REORG EVENT EMITTED:
+  ┌──────────────────────────────────────────────────────────┐
+  │  [REORG] fork_point = 0xgenesis                          │
+  │          depth      = 3                                  │
+  │          removed    = [0xa1, 0xa2, 0xa3]                 │
+  │          added      = [0xb1, 0xb2, 0xb3, 0xb4]          │
+  └──────────────────────────────────────────────────────────┘
+
+  LEGEND:
+  ✗       evicted from canonical chain
+  ───►    parent → child reference
+  └───    fork divergence point
+  ◄──     canonical HEAD pointer
+```
+
+#### Example Log Output
+
+```
+[REORG] fork_point=0xgenesis depth=2
+removed=[0xa1, 0xa2]
+added=[0xb1, 0xb2, 0xb3]
+```
+
+Reorgs are computed at **batch level**, comparing pre-import canonical state with post-import state. This avoids intermediate noise and reflects actual node state transitions.
+
+This makes fork behavior **observable and debuggable**, equivalent to what real execution clients expose.
 
 ---
 
@@ -195,7 +296,7 @@ The chain with the highest height becomes canonical. This is intentionally simpl
 | `ChainManager` | Stores all candidate branches |
 | `ForkChoiceRule` | Defines selection policy |
 | `choose()` | Picks best chain |
-| `import_headers()` | Creates new branches |
+| `import_headers()` | Creates new branches, emits reorg events |
 
 ---
 
@@ -204,7 +305,7 @@ The chain with the highest height becomes canonical. This is intentionally simpl
 - ✅ Competing branches
 - ✅ Forks from older ancestors (not just head)
 - ✅ Canonical switching
-- ✅ Reorg-like behavior
+- ✅ Reorg-like behavior with fork point + segment diff
 - ✅ Experimental consensus design
 
 ---
@@ -302,6 +403,7 @@ You should observe:
 
 ```
 [FORK] canonical switch ...
+[REORG] fork_point=... depth=... removed=[...] added=[...]
 ```
 
 ---
@@ -323,7 +425,7 @@ Then:
 1. Add new fork rule
 2. Modify `choose()`
 3. Add test
-4. Verify canonical switching
+4. Verify canonical switching + reorg output
 5. Commit
 
 ---
@@ -332,27 +434,14 @@ Then:
 
 MiniEthNet is not just a static client. It is a:
 
-> **Fork-choice experimentation framework**
+> **Fork-choice experimentation framework with full reorg observability**
 
 You can:
 
 - Test new consensus ideas
 - Simulate adversarial forks
 - Experiment with chain selection rules
-- Study reorg behavior
-
----
-
-### 4. Zero Async Data Races
-
-**Problem:** Async Rust makes it trivial to deadlock or corrupt shared state.
-
-**Solution:**
-- No mutex held across `.await`
-- Lock-free message passing where possible
-- Explicit session cleanup on disconnect
-
-**Result:** Zero panics in 50,000+ message tests.
+- Study reorg behavior with precise depth and segment tracking
 
 ---
 
@@ -433,6 +522,7 @@ View runs at: https://github.com/prateushsharma/EthNetLite/actions
 | One session per peer | Prevents resource exhaustion | SessionTable deduplication |
 | Capability gating | Prevents protocol confusion | Handshake validation |
 | Fork-aware sync | Prevents chain splits | Multi-chain canonical selection |
+| Reorg tracking | Makes fork transitions observable | Batch-level pre/post diff |
 | Async-safe concurrency | Prevents data races | No mutex across `.await` |
 | Deterministic header order | Enables testing/debugging | Linear append with validation |
 
@@ -474,6 +564,7 @@ Current roadmap for production-grade features:
 - ✅ All critical invariants enforced
 - ✅ Fork detection operational
 - ✅ Branch-aware fork system with pluggable fork-choice
+- ✅ Full reorg tracking (fork point + depth + segment diff)
 - 🟡 Gossip layer (next)
 - 🟡 Peer scoring (planned)
 
