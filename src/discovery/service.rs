@@ -422,28 +422,25 @@ async fn handle_sync_msg(
         }
 
         MiniSyncMessage::Headers(hs) => {
-            // Snapshot before import to detect canonical switch
-            let before_head = {
-                let mgr = chain.lock().unwrap();
-                mgr.canonical_head_hash()
-            };
-
-            {
+            let (reorg, height_after) = {
                 let mut mgr = chain.lock().unwrap();
-                mgr.import_headers(hs.headers);
-            }
-
-            let (after_head, after_height) = {
-                let mgr = chain.lock().unwrap();
-                (mgr.canonical_head_hash(), mgr.canonical_height())
+                let reorg = mgr.import_headers(hs.headers);
+                let height_after = mgr.canonical_height();
+                (reorg, height_after)
             };
 
-            if after_head != before_head {
+            if let Some(info) = reorg {
                 canonical_switches.fetch_add(1, Ordering::Relaxed);
+
+                println!(
+                    "[REORG] fork_point={} depth={} removed={:?} added={:?}",
+                    info.fork_point, info.depth, info.removed, info.added
+                );
+
                 event_bus.publish(NetworkEvent::canonical_switch(
-                    &before_head,
-                    &after_head,
-                    after_height,
+                    &info.old_head,
+                    &info.new_head,
+                    height_after,
                 ));
             }
         }
