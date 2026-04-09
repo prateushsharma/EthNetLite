@@ -25,6 +25,7 @@ use std::convert::TryFrom;
 
 const DISC_PROTO: &str = "discv-lite/0.1";
 const SYNC_PROTO: &str = "mini-sync/0.1";
+const DAS_PROTO: &str = "das-lite/0.1";
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -69,7 +70,11 @@ impl DiscoveryService {
             local_enr,
             table: Arc::new(Mutex::new(PeerTable::new(32))),
             chain: Arc::new(Mutex::new(ChainManager::new(genesis))),
-            local_caps: vec![DISC_PROTO.to_string(), SYNC_PROTO.to_string()],
+           local_caps: vec![
+    DISC_PROTO.to_string(),
+    SYNC_PROTO.to_string(),
+    "das-lite/0.1".to_string(),
+],
             sessions: Arc::new(Mutex::new(SessionTable::new())),
             event_bus: EventBus::new(),
             canonical_switches: Arc::new(AtomicU64::new(0)),
@@ -91,7 +96,11 @@ impl DiscoveryService {
             local_enr,
             table: Arc::new(Mutex::new(PeerTable::new(32))),
             chain,
-            local_caps: vec![DISC_PROTO.to_string(), SYNC_PROTO.to_string()],
+            local_caps: vec![
+    DISC_PROTO.to_string(),
+    SYNC_PROTO.to_string(),
+    "das-lite/0.1".to_string(),
+],
             sessions,
             event_bus,
             canonical_switches,
@@ -305,12 +314,15 @@ async fn connection_loop(
         sessions.lock().unwrap().touch(&peer_id);
 
         match env.proto.as_str() {
-            DISC_PROTO => handle_discovery_msg(&conn, &local, &table, &env.data).await,
-            SYNC_PROTO => {
-                handle_sync_msg(&conn, &chain, &env.data, &event_bus, &canonical_switches).await
-            }
-            _ => {}
-        }
+    DISC_PROTO => handle_discovery_msg(&conn, &local, &table, &env.data).await,
+    SYNC_PROTO => {
+        handle_sync_msg(&conn, &chain, &env.data, &event_bus, &canonical_switches).await
+    }
+    DAS_PROTO => {
+        handle_das_msg(&conn, &env.data).await
+    }
+    _ => {}
+}
     }
 }
 
@@ -460,4 +472,11 @@ async fn send_enveloped(conn: &Connection, proto: &str, payload: &[u8]) -> Resul
     send.write_all(&env).await.map_err(|_| ())?;
     send.finish().await.map_err(|_| ())?;
     Ok(())
+}
+
+async fn handle_das_msg(
+    _conn: &Connection,
+    payload: &[u8],
+) {
+    println!("[DAS] received {} bytes", payload.len());
 }

@@ -20,7 +20,7 @@ pub fn create_local_enr(port: u16) -> (EnrRecord, crate::crypto::Keypair) {
         .udp_port(port)
         .quic_port(port)
         .capability("discv-lite/0.1")
-        .capability("mini-sync/0.1")
+      .capability("das-lite/0.1")
         .build(&keypair);
 
     (enr, keypair)
