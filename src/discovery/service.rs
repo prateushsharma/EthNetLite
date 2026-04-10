@@ -23,6 +23,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, Duration};
 use std::convert::TryFrom;
 
+use crate::protocol::das::manager::DasManager;
+use crate::protocol::das::message::DasMessage;
+
 const DISC_PROTO: &str = "discv-lite/0.1";
 const SYNC_PROTO: &str = "mini-sync/0.1";
 const DAS_PROTO: &str = "das-lite/0.1";
@@ -55,6 +58,7 @@ pub struct DiscoveryService {
     local_enr: EnrRecord,
     table: Arc<Mutex<PeerTable>>,
     chain: Arc<Mutex<ChainManager>>,
+    das: Arc<Mutex<DasManager>>,   
     local_caps: Vec<String>,
     sessions: Arc<Mutex<SessionTable>>,
     event_bus: EventBus,
@@ -63,49 +67,53 @@ pub struct DiscoveryService {
 
 impl DiscoveryService {
     /// Original constructor — kept for backwards compat.
-    pub fn new(endpoint: Endpoint, local_enr: EnrRecord) -> Self {
-        let genesis = "0xgenesis".to_string();
-        Self {
-            endpoint,
-            local_enr,
-            table: Arc::new(Mutex::new(PeerTable::new(32))),
-            chain: Arc::new(Mutex::new(ChainManager::new(genesis))),
-           local_caps: vec![
-    DISC_PROTO.to_string(),
-    SYNC_PROTO.to_string(),
-    "das-lite/0.1".to_string(),
-],
-            sessions: Arc::new(Mutex::new(SessionTable::new())),
-            event_bus: EventBus::new(),
-            canonical_switches: Arc::new(AtomicU64::new(0)),
-        }
+   pub fn new(endpoint: Endpoint, local_enr: EnrRecord) -> Self {
+    let genesis = "0xgenesis".to_string();
+
+    Self {
+        endpoint,
+        local_enr,
+        table: Arc::new(Mutex::new(PeerTable::new(32))),
+        chain: Arc::new(Mutex::new(ChainManager::new(genesis))),
+        das: Arc::new(Mutex::new(DasManager::new())), // ✅ CORRECT PLACE
+        local_caps: vec![
+            DISC_PROTO.to_string(),
+            SYNC_PROTO.to_string(),
+            DAS_PROTO.to_string(),
+        ],
+        sessions: Arc::new(Mutex::new(SessionTable::new())),
+        event_bus: EventBus::new(),
+        canonical_switches: Arc::new(AtomicU64::new(0)),
     }
+}
 
     /// Module 9A constructor — accepts pre-built Arc refs so that
     /// gRPC server and P2P loops share the exact same state.
-    pub fn new_with_state(
-        endpoint: Endpoint,
-        local_enr: EnrRecord,
-        chain: Arc<Mutex<ChainManager>>,
-        sessions: Arc<Mutex<SessionTable>>,
-        event_bus: EventBus,
-        canonical_switches: Arc<AtomicU64>,
-    ) -> Self {
-        Self {
-            endpoint,
-            local_enr,
-            table: Arc::new(Mutex::new(PeerTable::new(32))),
-            chain,
-            local_caps: vec![
-    DISC_PROTO.to_string(),
-    SYNC_PROTO.to_string(),
-    "das-lite/0.1".to_string(),
-],
-            sessions,
-            event_bus,
-            canonical_switches,
-        }
+   pub fn new_with_state(
+    endpoint: Endpoint,
+    local_enr: EnrRecord,
+    chain: Arc<Mutex<ChainManager>>,
+    sessions: Arc<Mutex<SessionTable>>,
+    event_bus: EventBus,
+    canonical_switches: Arc<AtomicU64>,
+    das: Arc<Mutex<DasManager>>,
+) -> Self {
+    Self {
+        endpoint,
+        local_enr,
+        table: Arc::new(Mutex::new(PeerTable::new(32))),
+        chain,
+        das,
+        local_caps: vec![
+            DISC_PROTO.to_string(),
+            SYNC_PROTO.to_string(),
+            DAS_PROTO.to_string(),
+        ],
+        sessions,
+        event_bus,
+        canonical_switches,
     }
+}
 
     pub async fn run(self, bootstrap: Option<SocketAddr>) {
         if self.local_enr.quic_port().unwrap_or(0) == 9001 {
@@ -129,6 +137,7 @@ impl DiscoveryService {
         let sessions          = self.sessions.clone();
         let event_bus         = self.event_bus.clone();
         let canonical_switches = self.canonical_switches.clone();
+        let das = self.das.clone();
 
         tokio::spawn(async move {
             loop {
@@ -141,6 +150,7 @@ impl DiscoveryService {
                         let sessions          = sessions.clone();
                         let event_bus         = event_bus.clone();
                         let canonical_switches = canonical_switches.clone();
+                        let das = das.clone();
 
                         tokio::spawn(async move {
                             let sess = match inbound_handshake(&conn, &local.node_id().unwrap_or_default(), &caps).await {
@@ -177,10 +187,17 @@ impl DiscoveryService {
                                 &sess.agreed_caps,
                             ));
 
-                            connection_loop(
-                                conn, local, table, chain,
-                                sessions, event_bus, canonical_switches, peer_id,
-                            ).await;
+                           connection_loop(
+    conn,
+    local,
+    table,
+    chain,
+    das,
+    sessions,
+    event_bus,
+    canonical_switches,
+    peer_id,
+).await;
                         });
                     }
                 }
@@ -288,10 +305,11 @@ let Ok(addr) = format!("{}:{}", ip, quic_port).parse::<SocketAddr>() else { cont
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn connection_loop(
-    conn: Connection,
+     conn: Connection,
     local: EnrRecord,
     table: Arc<Mutex<PeerTable>>,
     chain: Arc<Mutex<ChainManager>>,
+    das: Arc<Mutex<DasManager>>,
     sessions: Arc<Mutex<SessionTable>>,
     event_bus: EventBus,
     canonical_switches: Arc<AtomicU64>,
@@ -313,14 +331,17 @@ async fn connection_loop(
         let Some(env) = Envelope::from_bytes(&buf) else { continue };
         sessions.lock().unwrap().touch(&peer_id);
 
-        match env.proto.as_str() {
+       match env.proto.as_str() {
     DISC_PROTO => handle_discovery_msg(&conn, &local, &table, &env.data).await,
+
     SYNC_PROTO => {
         handle_sync_msg(&conn, &chain, &env.data, &event_bus, &canonical_switches).await
     }
+
     DAS_PROTO => {
-        handle_das_msg(&conn, &env.data).await
+        handle_das_msg(&conn, &das, &env.data).await
     }
+
     _ => {}
 }
     }
@@ -476,7 +497,20 @@ async fn send_enveloped(conn: &Connection, proto: &str, payload: &[u8]) -> Resul
 
 async fn handle_das_msg(
     _conn: &Connection,
+    das: &Arc<Mutex<DasManager>>,
     payload: &[u8],
 ) {
-    println!("[DAS] received {} bytes", payload.len());
+    let Some(msg) = DasMessage::from_bytes(payload) else {
+        println!("[DAS] failed to decode message");
+        return;
+    };
+
+    let response = {
+        let mut mgr = das.lock().unwrap();
+        mgr.handle_message(msg)
+    };
+
+    if let Some(resp) = response {
+        println!("[DAS] response ready: {:?}", resp);
+    }
 }

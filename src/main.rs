@@ -16,6 +16,7 @@ use protocol::mini_sync::manager::ChainManager;
 use session::table::SessionTable;
 use telemetry::event_bus::EventBus;
 use telemetry::grpc_server::start_grpc_server;
+use crate::protocol::das::manager::DasManager;
 
 #[tokio::main]
 async fn main() {
@@ -60,16 +61,17 @@ async fn main() {
     }
 
     println!("[MAIN] p2p={} grpc={}", port, grpc_port);
+ let das = Arc::new(Mutex::new(DasManager::new()));
 
-    // ── Boot P2P service ──────────────────────────────────────────────────────
-    let svc = DiscoveryService::new_with_state(
-        endpoint,
-        local_enr,
-        chain,
-        sessions,
-        event_bus,
-        canonical_switches,
-    );
+let svc = DiscoveryService::new_with_state(
+    endpoint,
+    local_enr,
+    chain,
+    sessions,
+    event_bus,
+    canonical_switches,
+    das,
+);
 
     svc.run(bootstrap).await;
 }
