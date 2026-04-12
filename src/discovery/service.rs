@@ -139,6 +139,16 @@ impl DiscoveryService {
         let canonical_switches = self.canonical_switches.clone();
         let das = self.das.clone();
 
+        {
+    let mut das = self.das.lock().unwrap();
+    let announce = das.insert_dataset(
+        "dataset-1".to_string(),
+        b"this is a sample dataset used for das chunk sampling across peers".to_vec(),
+        8,
+    );
+    println!("[DAS] seeded local dataset: {:?}", announce);
+}
+
         tokio::spawn(async move {
             loop {
                 if let Some(connecting) = ep.accept().await {
@@ -441,6 +451,7 @@ async fn handle_sync_msg(
 
     match msg {
         MiniSyncMessage::Status(remote) => {
+           
             let req_opt = {
                 let mgr = chain.lock().unwrap();
                 if mgr.should_request(&remote) {
@@ -496,7 +507,7 @@ async fn send_enveloped(conn: &Connection, proto: &str, payload: &[u8]) -> Resul
 }
 
 async fn handle_das_msg(
-    _conn: &Connection,
+    conn: &Connection,
     das: &Arc<Mutex<DasManager>>,
     payload: &[u8],
 ) {
@@ -505,12 +516,27 @@ async fn handle_das_msg(
         return;
     };
 
-    let response = {
-        let mut mgr = das.lock().unwrap();
-        mgr.handle_message(msg)
-    };
+    let mut outgoing = Vec::new();
 
-    if let Some(resp) = response {
-        println!("[DAS] response ready: {:?}", resp);
+    {
+        let mut mgr = das.lock().unwrap();
+
+        match &msg {
+            DasMessage::AnnounceData { data_id, .. } => {
+                mgr.handle_message(msg.clone());
+
+                let sample_msgs = mgr.sample_requests(data_id, 3);
+                outgoing.extend(sample_msgs);
+            }
+            _ => {
+                if let Some(resp) = mgr.handle_message(msg) {
+                    outgoing.push(resp);
+                }
+            }
+        }
+    }
+
+    for out in outgoing {
+        let _ = send_enveloped(conn, DAS_PROTO, &out.to_bytes()).await;
     }
 }

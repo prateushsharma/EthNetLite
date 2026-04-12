@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use crate::protocol::das::{
     message::DasMessage,
+    sampler::Sampler,
     store::DataStore,
     types::{DataId, DataSet},
 };
@@ -7,12 +10,16 @@ use crate::protocol::das::{
 #[derive(Debug)]
 pub struct DasManager {
     store: DataStore,
+    announced: HashMap<DataId, u64>, // data_id -> total_chunks
+    samplers: HashMap<DataId, Sampler>,
 }
 
 impl DasManager {
     pub fn new() -> Self {
         Self {
             store: DataStore::new(),
+            announced: HashMap::new(),
+            samplers: HashMap::new(),
         }
     }
 
@@ -27,6 +34,26 @@ impl DasManager {
         }
     }
 
+    pub fn sample_requests(&mut self, data_id: &str, count: usize) -> Vec<DasMessage> {
+        let Some(total_chunks) = self.announced.get(data_id).copied() else {
+            return vec![];
+        };
+
+        let sampler = self
+            .samplers
+            .entry(data_id.to_string())
+            .or_insert_with(Sampler::new);
+
+        sampler
+            .choose_random_indices(total_chunks, count)
+            .into_iter()
+            .map(|index| DasMessage::RequestChunk {
+                data_id: data_id.to_string(),
+                index,
+            })
+            .collect()
+    }
+
     pub fn handle_message(&mut self, msg: DasMessage) -> Option<DasMessage> {
         match msg {
             DasMessage::AnnounceData { data_id, total_chunks } => {
@@ -34,6 +61,7 @@ impl DasManager {
                     "[DAS] announced dataset id={} total_chunks={}",
                     data_id, total_chunks
                 );
+                self.announced.insert(data_id, total_chunks);
                 None
             }
 
@@ -54,6 +82,22 @@ impl DasManager {
                     index,
                     bytes.len()
                 );
+
+                let sampler = self
+                    .samplers
+                    .entry(data_id.clone())
+                    .or_insert_with(Sampler::new);
+
+                sampler.mark_received(index);
+
+                println!(
+                    "[DAS] sampling status data_id={} requested={} received={} confidence={:.2}",
+                    data_id,
+                    sampler.requested_count(),
+                    sampler.received_count(),
+                    sampler.confidence()
+                );
+
                 None
             }
         }
