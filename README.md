@@ -4,6 +4,8 @@
 
 > A ruthlessly correct, zero-dependency reimplementation of Ethereum's networking layer — discv5, devp2p session management, and ETH/66 sync protocol — built to expose the brutal complexity hiding inside every blockchain client.
 
+Now includes a modular **Data Availability Sampling (DAS)** protocol for experimenting with probabilistic data availability at the networking layer.
+
 ---
 
 ## ⚠️ What This Actually Is
@@ -18,6 +20,7 @@ MiniEthNet implements the **full networking stack** of an Ethereum execution cli
 - **Protocol multiplexing** over capability-negotiated sessions
 - **Distributed discovery** via ENR-based peer tables
 - **Async-safe concurrency** with zero data races
+- **Data availability sampling** via random chunk-level probabilistic probing
 
 Every invariant that keeps geth, reth, and nethermind from imploding under network chaos? **Enforced here.**
 
@@ -38,6 +41,7 @@ MiniEthNet rebuilds what Ethereum Foundation researchers spent years designing:
 | Assume peers are honest | Handle Byzantine behavior at the protocol level |
 | Trust libp2p abstractions | Build QUIC transport, session tables, envelope routing from scratch |
 | Detect forks happened | Track exact reorg depth, removed/added segments |
+| Assume data is available | Sample availability probabilistically over chunks |
 
 This is the **infrastructure layer** most developers never touch.
 
@@ -54,8 +58,11 @@ This is the **infrastructure layer** most developers never touch.
 │   Canonical Chain Selection • Header Validation  │
 │   Fork Handling + Reorg Tracking                 │
 ├──────────────────────────────────────────────────┤
+│      DAS Protocol (das-lite/0.1)                 │
+│   Chunk Sampling • Availability Estimation       │
+├──────────────────────────────────────────────────┤
 │         Protocol Multiplexer (Envelopes)         │
-│      Route by Capability: discv-lite, mini-sync  │
+│  Route by Capability: discv-lite, mini-sync, das │
 ├──────────────────────────────────────────────────┤
 │     Session Layer (Capability Negotiation)       │
 │  Cryptographic Handshake • Peer Deduplication    │
@@ -75,6 +82,18 @@ Each layer **enforces invariants** that prevent the catastrophic failures real c
 - Missing capability checks → protocol confusion
 - Unsynchronized fork choice → chain splits
 - Race conditions → state corruption
+
+---
+
+## 📡 Protocols
+
+| Protocol | Version | Purpose |
+|----------|---------|---------|
+| `discv-lite` | 0.1 | Peer discovery via ENR + Kademlia-style DHT |
+| `mini-sync` | 0.1 | Fork-aware header sync, reorg tracking |
+| `das-lite` | 0.1 | Data availability sampling via random chunk probing |
+
+All protocols are **capability-negotiated** at the session layer and **multiplexed** over the same QUIC connection.
 
 ---
 
@@ -107,6 +126,7 @@ Real clients die without this. MiniEthNet **enforces it at the type level.**
 // Unknown protocols → instant rejection
 match envelope.proto {
     "mini-sync/0.1" => { /* only execute if negotiated */ }
+    "das-lite/0.1"  => { /* only execute if negotiated */ }
     _ => return Err("capability not shared");
 }
 ```
@@ -445,6 +465,131 @@ You can:
 
 ---
 
+## 🔍 Data Availability Sampling (DAS)
+
+MiniEthNet includes a minimal data availability (DA) protocol as a first-class protocol layer:
+
+- **Protocol:** `das-lite/0.1`
+- **Negotiated** via capability handshake — only runs if both peers support it
+- **Multiplexed** over the same QUIC session as discovery and sync
+
+### Design
+
+DAS is implemented as an isolated protocol layer under:
+
+```
+src/protocol/das/
+```
+
+| File | Responsibility |
+|------|---------------|
+| `types.rs` | `DataSet` and `Chunk` abstractions |
+| `store.rs` | In-memory chunk storage, keyed by `(data_id, chunk_index)` |
+| `message.rs` | DAS wire message definitions |
+| `sampler.rs` | Random sampling logic |
+| `manager.rs` | Protocol coordination, tracks pending samples |
+
+---
+
+### Data Model
+
+Data is represented as a chunked dataset:
+
+```
+DataSet → split into fixed-size Chunks
+```
+
+Each dataset:
+- has a unique `data_id`
+- is chunked deterministically
+- supports retrieval via `(data_id, chunk_index)`
+
+---
+
+### Protocol Messages
+
+```
+AnnounceData  { data_id, total_chunks }
+RequestChunk  { data_id, index }
+ChunkResponse { data_id, index, bytes }
+```
+
+---
+
+### Sampling Flow
+
+```
+                        ┌─────────────────────────────────────────────────────┐
+                        │              DAS SAMPLING FLOW                      │
+                        └─────────────────────────────────────────────────────┘
+
+  1. Producer node announces dataset:
+
+     [Node A] ──AnnounceData { data_id, total_chunks=64 }──► [Node B]
+
+
+  2. Sampler selects random chunk indices:
+
+     sample_indices = random_subset(0..64, k=8)
+     e.g. [3, 11, 27, 40, 52, 7, 19, 61]
+
+
+  3. Sampler requests each chunk:
+
+     [Node B] ──RequestChunk { data_id, index=3 }──► [Node A]
+     [Node B] ──RequestChunk { data_id, index=11 }──► [Node A]
+     ...
+
+
+  4. Responses tracked:
+
+     received = 7 / requested = 8
+
+
+  5. Availability confidence computed:
+
+     confidence = received / requested = 0.875
+
+
+  LEGEND:
+  ───►  message direction
+  k     number of sampled chunks (configurable)
+```
+
+---
+
+### Key Property
+
+Nodes **do not download full data.**
+
+Availability is inferred via random sampling over chunks:
+
+```
+confidence = received / requested
+```
+
+A high confidence score from a small sample provides probabilistic proof that the full dataset is available — without requiring any node to download it entirely.
+
+---
+
+### Scope
+
+This is a simplified DAS model — the focus is protocol mechanics, not production cryptography:
+
+- No erasure coding
+- No KZG commitments
+- No cell/column abstraction
+
+What it **does** demonstrate:
+
+- Protocol isolation (clean capability-gated separation)
+- Network-level chunk sampling
+- Probabilistic availability estimation
+
+> This is the architectural foundation. Erasure coding and KZG can be layered on top without structural changes.
+
+---
+
 ## 🛠️ Prerequisites
 
 - **Rust:** 1.80+ (edition 2021)
@@ -525,6 +670,7 @@ View runs at: https://github.com/prateushsharma/EthNetLite/actions
 | Reorg tracking | Makes fork transitions observable | Batch-level pre/post diff |
 | Async-safe concurrency | Prevents data races | No mutex across `.await` |
 | Deterministic header order | Enables testing/debugging | Linear append with validation |
+| DAS protocol isolation | Prevents capability bleed | Separate module, gated by handshake |
 
 **These are not "nice to haves" — they are survival mechanisms in adversarial networks.**
 
@@ -540,6 +686,8 @@ Current roadmap for production-grade features:
 - **LMD-GHOST Fork Choice:** Consensus-aware canonical selection
 - **Snap Sync:** State trie synchronization protocol
 - **DevP2P Compression:** Snappy-compressed message frames
+- **DAS Erasure Coding:** Reed-Solomon encoding over chunks
+- **KZG Commitments:** Polynomial commitment scheme for chunk proofs
 
 **The architecture supports all of this without refactoring.**
 
@@ -549,9 +697,10 @@ Current roadmap for production-grade features:
 
 | **Metric** | **Value** | **Significance** |
 |------------|-----------|------------------|
-| Lines of protocol code | ~3,000 | Non-trivial systems implementation |
+| Lines of protocol code | ~3,500 | Non-trivial systems implementation |
 | Async concurrency primitives | 15+ | Deep async runtime understanding |
 | Network-level invariants | 8+ | Protocol correctness focus |
+| Protocol layers | 3 (discv, sync, DAS) | Modular capability-negotiated stack |
 | Zero unsafe blocks | ✅ | Memory-safe systems code |
 | Multi-node tested | ✅ | Distributed systems validation |
 
@@ -565,8 +714,10 @@ Current roadmap for production-grade features:
 - ✅ Fork detection operational
 - ✅ Branch-aware fork system with pluggable fork-choice
 - ✅ Full reorg tracking (fork point + depth + segment diff)
+- ✅ DAS protocol (das-lite/0.1) — chunk sampling + availability estimation
 - 🟡 Gossip layer (next)
 - 🟡 Peer scoring (planned)
+- 🟡 DAS erasure coding (planned)
 
 ---
 
